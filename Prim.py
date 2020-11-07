@@ -12,9 +12,10 @@ import matplotlib.pyplot as plt
 from keras import backend as K
 import scipy.optimize
 import scipy.signal
+import tensorflow as tf
+import time
 
 print('Imports done')
-
 #%% import the CNN
 
 model = VGG19(include_top=True, pooling="avg", classes=1000)
@@ -48,19 +49,12 @@ def Test_CNN(img_path):
     print(labels[pred[0]+1])
 
 #Gram matrix & Loss function definition
-def gram_Matrix(activation):
-    act=activation[0]
-    s = act.shape
-    temp=np.reshape(act,(s[0]*s[1],s[2]))
-    new_gram= np.dot(np.transpose(temp),temp)
-    return new_gram
-
-def get_Tloss(act1,act2,layers_list):
-    loss=0
+def get_Tloss(activ1,activ2,layers_list):
+    loss=K.constant(0)
     for idx in layers_list:
-        width = np.shape(act1[0][idx])[1]
-        depth = np.shape(act1[0][idx])[3]
-        loss+= (1/(4*(depth*(width**2))**2))*np.sum((gram_Matrix(act1[0][idx])[:,:]-gram_Matrix(act2[0][idx])[:,:])**2)#we assume that width=height
+        width = np.shape(activ2[0][idx])[1]
+        depth = np.shape(activ2[0][idx])[3]
+        loss += (1/(4*(depth*(width**2))**2))*K.sum((gram_Matrix_backend(activ1[0][idx])[:,:]-gram_Matrix_backend(activ2[0][idx])[:,:])**2)#we assume that width=height
     return loss
 
 def texture_loss(layers_list,act1,act2):
@@ -76,12 +70,10 @@ def gram_Matrix_backend(activation):
     
 def get_Tloss_backend(activ2,layers_list):
     loss=K.constant(0)
-    num=1
     for idx in layers_list:
         activ1= model.layers[idx].output
         width = np.shape(activ2[0][idx])[1]
         depth = np.shape(activ2[0][idx])[3]
-        num+=1
         loss += (1/(4*(depth*(width**2))**2))*K.sum((gram_Matrix_backend(activ1)[:,:]-gram_Matrix_backend(activ2[0][idx])[:,:])**2)#we assume that width=height
     return loss
 
@@ -139,6 +131,7 @@ def create_grad_list(layer,active_func,src_tensor):
     return output
 
 def grad_descent(u0,src_tensor,active_func,alpha_list,layer_list,iteration_list,plot_loss=False,plot_img=False,change_alpha=False,save_mode=0):
+    start_time = time.time()
     u=u0
     src_act = active_func(src_tensor)
     loss_list=[]
@@ -159,7 +152,8 @@ def grad_descent(u0,src_tensor,active_func,alpha_list,layer_list,iteration_list,
         for i in range(iteration_list[idx]):
             if (i%10==0):
                 print(".",end= " ")
-            u = u - alpha*func(u)*255/np.max(func(u))
+            #u = u - alpha*func(u)*255/np.max(func(u))
+            u = u - alpha*func(u)/np.std(u)
             if plot_loss:
                 loss_list.append(np.log(texture_loss(layer,active_func(u),src_act)))
             if change_alpha and (i>2):
@@ -174,22 +168,29 @@ def grad_descent(u0,src_tensor,active_func,alpha_list,layer_list,iteration_list,
         plt.plot(loss_list)
         plt.title('Loss for learning rate='+str(alpha_list)+';layers ='+str(layer_list)+';iterations='+str(iteration_list)+';change_alpha='+str(change_alpha))
         plt.show()
+    print("--- %s seconds ---" % (time.time() - start_time))
     return u[0]
 
 #%% Define the source texture and white noise
-src_img_tensor= load_tensor("texture3.jpg")
-x0_tensor = create_noise(127,30,(224,224,3))
- 
-outputs = [layer.output for layer in model.layers]
-active_func = K.function([model.input], [outputs])
-src_act = active_func(src_img_tensor)
-
-print("Start gradient descent")     
-
-alphas=[1e-2,1e-2,1e-2,1e-2,1e-2]
-iterations=[2000,400,200,200,200]
-u0=blur_tensor(x0_tensor,224,224,(3,3))
-
-result=grad_descent(u0,src_img_tensor,active_func,alphas,layer,iterations,True,True,True,save_mode=2)    
+with tf.device("/device:GPU:0"):
+    print('use GPU')
+    
+    src_img_tensor= load_tensor("texture3.jpg")
+    x0_tensor = create_noise(127,30,(224,224,3))
+     
+    outputs = [layer.output for layer in model.layers]
+    active_func = K.function([model.input], [outputs])
+    src_act = active_func(src_img_tensor)
+    
+    print("Start gradient descent")
+    
+    alphas=[1e-2]
+    iterations=[2000]
+    my_layer=layer3
+    #u0=load_tensor("input.jpg")
+    #u0=blur_tensor(x0_tensor,224,224,(3,3))
+    u0=x0_tensor
+    
+    result=grad_descent(u0,src_img_tensor,active_func,alphas,my_layer,iterations,True,True,True,save_mode=0)    
 
 
