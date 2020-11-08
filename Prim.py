@@ -49,16 +49,16 @@ def Test_CNN(img_path):
     print(labels[pred[0]+1])
 
 #Gram matrix & Loss function definition
-def get_Tloss(activ1,activ2,layers_list):
+def get_Tloss(activ1,activ2,layers_list,weight):
     loss=K.constant(0)
-    for idx in layers_list:
+    for i,idx in enumerate(layers_list):
         width = np.shape(activ2[0][idx])[1]
         depth = np.shape(activ2[0][idx])[3]
-        loss += (1/(4*(depth*(width**2))**2))*K.sum((gram_Matrix_backend(activ1[0][idx])[:,:]-gram_Matrix_backend(activ2[0][idx])[:,:])**2)#we assume that width=height
+        loss += weight[i]*(1/(4*(depth*(width**2))**2))*K.sum((gram_Matrix_backend(activ1[0][idx])[:,:]-gram_Matrix_backend(activ2[0][idx])[:,:])**2)#we assume that width=height
     return loss
 
-def texture_loss(layers_list,act1,act2):
-    return get_Tloss(act1,act2,layers_list)
+def texture_loss(layers_list,act1,act2,weight):
+    return get_Tloss(act1,act2,layers_list,weight)
 
 #Backend versions:
 def gram_Matrix_backend(activation):
@@ -68,17 +68,17 @@ def gram_Matrix_backend(activation):
     new_gram= K.dot(K.transpose(temp),temp)
     return new_gram
     
-def get_Tloss_backend(activ2,layers_list):
+def get_Tloss_backend(activ2,layers_list,weight):
     loss=K.constant(0)
-    for idx in layers_list:
+    for i,idx in enumerate(layers_list):
         activ1= model.layers[idx].output
         width = np.shape(activ2[0][idx])[1]
         depth = np.shape(activ2[0][idx])[3]
-        loss += (1/(4*(depth*(width**2))**2))*K.sum((gram_Matrix_backend(activ1)[:,:]-gram_Matrix_backend(activ2[0][idx])[:,:])**2)#we assume that width=height
+        loss += weight[i]*(1/(4*(depth*(width**2))**2))*K.sum((gram_Matrix_backend(activ1)[:,:]-gram_Matrix_backend(activ2[0][idx])[:,:])**2)#we assume that width=height
     return loss
 
-def main_loss_backend(src_activ,layers):  
-    return get_Tloss_backend(src_activ,layers)
+def main_loss_backend(src_activ,layers,weight):  
+    return get_Tloss_backend(src_activ,layers,weight)
 
 #save image 'u' to the declared path
 def save(path, u, mode=3):
@@ -123,19 +123,19 @@ def create_noise(moy,sigma,shape):
     x0_tensor = np.expand_dims(x0_tensor, axis=0)
     return x0_tensor
 
-def create_grad_list(layer,active_func,src_tensor):
+def create_grad_list(layer,active_func,src_tensor,weight_list):
     src_act=active_func(src_tensor)
     output=[]
-    for lyr in layer:
-        output.append(K.function([model.input], K.gradients(main_loss_backend(src_act,lyr),model.input)[0]))
+    for idx,lyr in enumerate(layer):
+        output.append(K.function([model.input], K.gradients(main_loss_backend(src_act,lyr,weight_list[idx]),model.input)[0]))
     return output
 
-def grad_descent(u0,src_tensor,active_func,alpha_list,layer_list,iteration_list,plot_loss=False,plot_img=False,change_alpha=False,save_mode=0):
+def grad_descent(u0,src_tensor,active_func,alpha_list,layer_list,iteration_list,weight_list,plot_loss=False,plot_img=False,change_alpha=False,save_mode=0):
     start_time = time.time()
     u=u0
     src_act = active_func(src_tensor)
     loss_list=[]
-    function_list=create_grad_list(layer_list,active_func,src_tensor)
+    function_list=create_grad_list(layer_list,active_func,src_tensor,weight_list)
     if ((len(alpha_list)!=len(layer_list))or(len(alpha_list)!=len(iteration_list))or(len(alpha_list)!=len(function_list))):
         raise Exception('Error: alpha_list, layer_list, iteration_list and function_list must have the same length.')
     if ((change_alpha) and (not(plot_loss))):
@@ -149,15 +149,16 @@ def grad_descent(u0,src_tensor,active_func,alpha_list,layer_list,iteration_list,
         print('layer n°',idx+1,'/',len(layer_list))
         alpha=alpha_list[idx]
         func=function_list[idx]
+        weight=weight_list[idx]
         for i in range(iteration_list[idx]):
             if (i%10==0):
                 print(".",end= " ")
             #u = u - alpha*func(u)*255/np.max(func(u))
             u = u - alpha*func(u)/np.std(u)
             if plot_loss:
-                loss_list.append(np.log(texture_loss(layer,active_func(u),src_act)))
+                loss_list.append(np.log(texture_loss(layer,active_func(u),src_act,weight)))
             if change_alpha and (i>2):
-                if (loss_list[-1]>loss_list[-2]):
+                if (loss_list[-1]>loss_list[-3]):
                     alpha=alpha/2
         if plot_img:
             plt.figure()
@@ -175,7 +176,7 @@ def grad_descent(u0,src_tensor,active_func,alpha_list,layer_list,iteration_list,
 with tf.device("/device:GPU:0"):
     print('use GPU')
     
-    src_img_tensor= load_tensor("texture3.jpg")
+    src_img_tensor= load_tensor("texture2.jpg")
     x0_tensor = create_noise(127,30,(224,224,3))
      
     outputs = [layer.output for layer in model.layers]
@@ -184,13 +185,19 @@ with tf.device("/device:GPU:0"):
     
     print("Start gradient descent")
     
-    alphas=[1e-2]
-    iterations=[2000]
+    alphas=[2e-3]
+    iterations=[1000]
     my_layer=layer3
+    weights=[[1000,10,1,0.1,0.1]]
     #u0=load_tensor("input.jpg")
     #u0=blur_tensor(x0_tensor,224,224,(3,3))
     u0=x0_tensor
     
-    result=grad_descent(u0,src_img_tensor,active_func,alphas,my_layer,iterations,True,True,True,save_mode=0)    
-
-
+    result=grad_descent(u0,src_img_tensor,active_func,alphas,my_layer,iterations,weights,True,True,True,save_mode=0) 
+    
+    
+    
+    
+    
+    
+    
