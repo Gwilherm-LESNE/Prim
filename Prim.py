@@ -23,11 +23,13 @@ model = VGG19(include_top=True, pooling="avg", classes=1000)
 model.summary()
 
 layers_list=[1,4,7,12,17] #indexes of the layers we want to compute the gram matrix
+pool_list=[3,6,11,16,21]
 layers_list_bis=["block1_conv1","block2_conv1","block3_conv1","block4_conv1","block5_conv1"]
 
 layer=[[1],[1,4],[1,4,7],[1,4,7,12],[1,4,7,12,17]]
 layer2=[[1],[4],[7],[12],[17]]
 layer3=[layers_list]
+layer4=[pool_list]
 
 #%% Testing the CNN
 def Test_CNN(img_path):    
@@ -54,7 +56,7 @@ def get_Tloss(activ1,activ2,layers_list,weight):
     for i,idx in enumerate(layers_list):
         width = np.shape(activ2[0][idx])[1]
         depth = np.shape(activ2[0][idx])[3]
-        loss += weight[i]*(1/(4*(depth*(width**2))**2))*K.sum((gram_Matrix_backend(activ1[0][idx])[:,:]-gram_Matrix_backend(activ2[0][idx])[:,:])**2)#we assume that width=height
+        loss += weight[i]*(1/(4*(depth*(width**2)*(2**i))**2))*K.sum((gram_Matrix_backend(activ1[0][idx])[:,:]-gram_Matrix_backend(activ2[0][idx])[:,:])**2)#we assume that width=height
     return loss
 
 def texture_loss(layers_list,act1,act2,weight):
@@ -74,7 +76,7 @@ def get_Tloss_backend(activ2,layers_list,weight):
         activ1= model.layers[idx].output
         width = np.shape(activ2[0][idx])[1]
         depth = np.shape(activ2[0][idx])[3]
-        loss += weight[i]*(1/(4*(depth*(width**2))**2))*K.sum((gram_Matrix_backend(activ1)[:,:]-gram_Matrix_backend(activ2[0][idx])[:,:])**2)#we assume that width=height
+        loss += weight[i]*(1/(4*(depth*(width**2)*(2**i))**2))*K.sum((gram_Matrix_backend(activ1)[:,:]-gram_Matrix_backend(activ2[0][idx])[:,:])**2)#we assume that width=height
     return loss
 
 def main_loss_backend(src_activ,layers,weight):  
@@ -104,9 +106,12 @@ def blur_tensor(img_tensor,width,height,blur_shape):
 
 #load an image and convert it into a tensor
 def load_tensor(img_path):
-    new_img = image.load_img(img_path, target_size=(224, 224),interpolation="bicubic")
-    new_tensor = image.img_to_array(new_img)                    # (height, width, channels)
-    return np.expand_dims(new_tensor, axis=0)
+    #new_img = image.load_img(img_path, target_size=(224, 224),interpolation="bicubic")
+    new_img = image.load_img(img_path, target_size=None)
+    new_tensor = image.img_to_array(new_img)                   # (height, width, channels)
+    out = np.expand_dims(new_tensor, axis=0)
+    out = out[0,0:224,0:224]
+    return np.array([out])
 
 #create white gaussian noise
 def create_noise(moy,sigma,shape):
@@ -167,7 +172,7 @@ def grad_descent(u0,src_tensor,active_func,alpha_list,layer_list,iteration_list,
     if plot_loss:
         plt.figure()
         plt.plot(loss_list)
-        plt.title('Loss for learning rate='+str(alpha_list)+';layers ='+str(layer_list)+';iterations='+str(iteration_list)+';change_alpha='+str(change_alpha))
+        plt.title('Loss for learning rate='+str(alpha_list)+';layers ='+str(layer_list)+';iterations='+str(iteration_list)+';change_alpha='+str(change_alpha)+'weights='+str(weight_list))
         plt.show()
     print("--- %s seconds ---" % (time.time() - start_time))
     return u[0]
@@ -176,26 +181,35 @@ def grad_descent(u0,src_tensor,active_func,alpha_list,layer_list,iteration_list,
 with tf.device("/device:GPU:0"):
     print('use GPU')
     
-    src_img_tensor= load_tensor("texture2.jpg")
-    x0_tensor = create_noise(127,30,(224,224,3))
-     
+    src_img_tensor= load_tensor("texture9.jpg")
+    #x0_tensor = create_noise(127,30,(224,224,3))
+    #x0_tensor = np.array([np.random.randn(224,224,3)*27+128])
+    alea = np.random.randn(224,224)*27+128
+    x0_tensor= np.zeros((1,224,224,3))
+    x0_tensor[0,:,:,0]=alea[:,:]
+    x0_tensor[0,:,:,1]=alea[:,:]
+    x0_tensor[0,:,:,2]=alea[:,:]
+    
     outputs = [layer.output for layer in model.layers]
     active_func = K.function([model.input], [outputs])
     src_act = active_func(src_img_tensor)
     
     print("Start gradient descent")
     
-    alphas=[2e-3]
-    iterations=[1000]
+    #alphas=[1000,5,0.5,1e-2,2e-3]
+    #iterations=[200,200,100,100,100]
+    #my_layer=layer
+    #weights=[[1],[1,1],[1,1,1],[1000,100,10,0.1],[100,10,1,1,1]]
+    
+    alphas=[2e-1]
+    iterations=[2000]
     my_layer=layer3
-    weights=[[1000,10,1,0.1,0.1]]
+    weights=[[1,1,1,1,1]]
     #u0=load_tensor("input.jpg")
-    #u0=blur_tensor(x0_tensor,224,224,(3,3))
-    u0=x0_tensor
+    u0=blur_tensor(x0_tensor,224,224,(3,3))
+    #u0=x0_tensor
     
-    result=grad_descent(u0,src_img_tensor,active_func,alphas,my_layer,iterations,weights,True,True,True,save_mode=0) 
-    
-    
+    result=grad_descent(u0,src_img_tensor,active_func,alphas,my_layer,iterations,weights,True,True,True,save_mode=2) 
     
     
     
