@@ -11,6 +11,7 @@ import numpy as np
 import time 
 import PIL.Image
 import scipy.fft
+import tensorflow_probability as tfp
 
 print('Imports Done')
 #%%
@@ -153,6 +154,16 @@ def spectrum_grad_descent(x0,text,beta=1e-3,layer_name = ['block1_conv1','block2
         temp_str='./Results_v2/spectrum_ite=%sk_lr=%s.jpg'%(iterations//1000,lr)
         plt.imsave(temp_str,tensor_to_array(x))
     return x
+
+#L-BFGS Functions
+def lbfgs_loss(ipt_tensor):
+  ipt = tf.reshape(ipt_tensor, (1,224,224,3))
+  text13=preprocess_img('texture13.jpg')
+  model_act = get_activ(layer_name=['block1_conv1','block2_conv1','block3_conv1','block4_conv1','block5_conv1'])
+  return texture_loss(ipt,text13,model_act)
+
+def grad_and_val(ipt_tensor):
+  return tfp.math.value_and_gradient(lbfgs_loss,ipt_tensor,use_gradient_tape=False)
 
 #%%
 x0 = tf.constant(np.random.randn(1,224,224,3)/9 + 0.5) # (1,224,224,3)/9+0.5 to be in [0,1] range 
@@ -501,4 +512,9 @@ with tf.device("/device:GPU:0"):
     plt.imshow(new_out_img)
     
     
-
+    #L-BFGS PART:
+    result = tfp.optimizer.lbfgs_minimize(grad_and_val,var0,max_iterations=10)
+    print(result.num_iterations)
+    out_img = tensor_to_image(tf.reshape(result.position,(1,224,224,3)))
+    plt.figure()
+    plt.imshow(out_img)
