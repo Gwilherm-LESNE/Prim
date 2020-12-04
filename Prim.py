@@ -202,7 +202,7 @@ with tf.device("/device:GPU:0"):
     #weights=[[1],[1,1],[1,1,1],[1000,100,10,0.1],[100,10,1,1,1]]
     
     alphas=[2e-1]
-    iterations=[2000]
+    iterations=[200]
     my_layer=layer3
     weights=[[1,1,1,1,1]]
     #u0=load_tensor("input.jpg")
