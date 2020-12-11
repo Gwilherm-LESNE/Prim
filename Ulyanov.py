@@ -32,24 +32,28 @@ def get_activation(activation,name):
     return hook
 
 def gram_matrix(x):
-    result = torch.einsum('bijc,bijd->bcd', x, x)
+    result = torch.einsum('bcij,bdij->bcd', x, x)
     shape = x.shape
-    temp = shape[1]*shape[2]
+    temp = shape[2]*shape[3]
     return result/temp
 
-def texture_loss(output,target,src_vgg19,ipt_vgg19):    
+def texture_loss(output,target,src_vgg19,ipt_vgg19):
+    trans=transforms.Compose([transforms.ToPILImage(),transforms.Resize((224,224)),transforms.ToTensor()])
+    output=torch.unsqueeze(trans(output),0)
+    target=torch.unsqueeze(trans(target),0)
+    
     source_activation = {}
     input_activation = {}
     index_list=[2,9,16,29,42]
     name_list=['block1_conv1','block2_conv1','block3_conv1','block4_conv1','block5_conv1']
     for i,index in enumerate(index_list):    
-        src_vgg19.features[index].register_forward_hook(get_activation(source_activation,name_list[i]))
-        ipt_vgg19.features[index].register_forward_hook(get_activation(input_activation,name_list[i]))
+        src_vgg19[index].register_forward_hook(get_activation(source_activation,name_list[i]))
+        ipt_vgg19[index].register_forward_hook(get_activation(input_activation,name_list[i]))
 
-    ipt_output = ipt_vgg19(output)
-    src_output = src_vgg19(target)
+    ipt_vgg19(output)
+    src_vgg19(target)
     
-    loss=torch.tensor(0.0)    
+    loss=torch.tensor(0.0)  
     for idx,name in enumerate(name_list):
         temp = torch.pow(gram_matrix(input_activation[name])-gram_matrix(source_activation[name]),2)
         loss += torch.sum(temp)
@@ -58,7 +62,7 @@ def texture_loss(output,target,src_vgg19,ipt_vgg19):
 def custom_loss(outputs,targets,src_vgg,ipt_vgg):#outputs & targets are 4D arrays, first dimension is batch size
     batch_loss = torch.tensor(0.0)
     for i in range(outputs.shape[0]):
-        batch_loss += texture_loss(torch.unsqueeze(outputs[i],0),torch.unsqueeze(targets[i],0),src_vgg,ipt_vgg)
+        batch_loss += texture_loss(outputs[i],targets[i],src_vgg,ipt_vgg)
     return batch_loss
 
 class TextureNet(nn.Module):
@@ -275,44 +279,47 @@ def train(net, batch_size, n_epochs, learning_rate, texture_path):
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     
     src_vgg19 = models.vgg19_bn(pretrained=True)
-    src_vgg19.eval()
+    src_net = src_vgg19.features
+    for p in src_net.parameters():
+        p.requires_grad = False
     ipt_vgg19 = models.vgg19_bn(pretrained=True)
-    ipt_vgg19.eval()
+    ipt_net = ipt_vgg19.features
+    for p in ipt_net.parameters():
+        p.requires_grad = False
     
     model = net
     model = model.to(device)
     optimizer = torch.optim.Adam(model.parameters(),learning_rate)
     lr_sched = torch.optim.lr_scheduler.ExponentialLR(optimizer, gamma=0.95)
     
-    dataset = NoiseTextureDataset(16, texture_path)
+    dataset = NoiseTextureDataset(batch_size, texture_path)
     #train = DataLoader(dataset, batch_size=16, shuffle=False, num_workers=2)
     train_history = []
 
     # On itère sur les epochs
     for i in range(n_epochs):
         print("=================\n==== EPOCH "+str(i+1)+" ====\n=================\n")
-        epoch(dataset, model, optimizer, train_history, src_vgg19, ipt_vgg19, device)
+        epoch(dataset, model, optimizer, train_history, src_net, ipt_net, device)
         lr_sched.step()
     return train_history
 
 print('## Defining functions: done ##')  
 #%%
 
-text7 = plt.imread('texture7.jpg')/255
-x0 = torch.tensor(np.random.randn(1,3,224,224)/9 + 0.5,dtype=torch.float)
-
+#text7 = plt.imread('texture7.jpg')/255
+#x0 = torch.tensor(np.random.randn(1,3,224,224)/9 + 0.5,dtype=torch.float)
+#
 #Download VGG19 models for loss computing
-src_vgg19 = models.vgg19_bn(pretrained=True)
-src_vgg19.eval()
-ipt_vgg19 = models.vgg19_bn(pretrained=True)
-ipt_vgg19.eval()
-
-#•print(texture_loss(x0,preprocess_img(text7),src_vgg19,ipt_vgg19)) #Test the loss function
+#src_vgg19 = models.vgg19_bn(pretrained=True)
+#src_vgg19.eval()
+#ipt_vgg19 = models.vgg19_bn(pretrained=True)
+#ipt_vgg19.eval()
+#
+#print(texture_loss(x0,preprocess_img(text7),src_vgg19,ipt_vgg19)) #Test the loss function
 
 print('## Setting variables: done ##')
 #%%
-myNet=TextureNet()
-      
-history = train(myNet, 16, 200, 0.01, 'texture7.jpg')
+myNet=TextureNet()     
+history = train(myNet, 16, 10, 0.01, 'texture7.jpg')
 
 
