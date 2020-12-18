@@ -1,9 +1,5 @@
 # -*- coding: utf-8 -*-
-"""
-Created on Mon Dec  7 08:19:42 2020
 
-@author: ROG
-"""
 
 import torch
 import torch.nn as nn
@@ -41,7 +37,7 @@ def texture_loss(output,target,src_vgg19,ipt_vgg19):
     trans=transforms.Compose([transforms.ToPILImage(),transforms.Resize((224,224)),transforms.ToTensor()])
     output=torch.unsqueeze(trans(output),0)
     target=torch.unsqueeze(trans(target),0)
-    
+        
     source_activation = {}
     input_activation = {}
     index_list=[2,9,16,29,42]
@@ -49,21 +45,77 @@ def texture_loss(output,target,src_vgg19,ipt_vgg19):
     for i,index in enumerate(index_list):    
         src_vgg19[index].register_forward_hook(get_activation(source_activation,name_list[i]))
         ipt_vgg19[index].register_forward_hook(get_activation(input_activation,name_list[i]))
-
+    
     ipt_vgg19(output)
     src_vgg19(target)
-    
+        
     loss=torch.tensor(0.0)  
     for idx,name in enumerate(name_list):
         temp = torch.pow(gram_matrix(input_activation[name])-gram_matrix(source_activation[name]),2)
-        loss += torch.sum(temp)
+        loss = loss + torch.sum(temp)
+    return loss
+
+def texture_loss_bis(output,target):
+    trans=transforms.Compose([transforms.ToPILImage(),transforms.Resize((224,224)),transforms.ToTensor()])
+    output=torch.unsqueeze(trans(output),0)
+    target=torch.unsqueeze(trans(target),0)
+    
+    loss=torch.tensor(0.0)
+    index_list=[2,9,16,29,42]
+    activNet = ActivNet(index_list)
+    activNet.cuda()
+    activNet.eval()
+    for idx,_ in enumerate(index_list):
+        temp = torch.pow(gram_matrix(activNet.get_activ(output,idx))-gram_matrix(activNet.get_activ(target,idx)),2)
+        loss = loss + torch.sum(temp)
     return loss
 
 def custom_loss(outputs,targets,src_vgg,ipt_vgg):#outputs & targets are 4D arrays, first dimension is batch size
     batch_loss = torch.tensor(0.0)
     for i in range(outputs.shape[0]):
-        batch_loss += texture_loss(outputs[i],targets[i],src_vgg,ipt_vgg)
+        batch_loss = batch_loss + texture_loss(outputs[i],targets[i],src_vgg,ipt_vgg)
     return batch_loss
+
+def custom_loss_bis(outputs,targets):#outputs & targets are 4D arrays, first dimension is batch size
+    batch_loss = torch.tensor(0.0)
+    for i in range(outputs.shape[0]):
+        batch_loss = batch_loss + texture_loss_bis(outputs[i],targets[i])
+    return batch_loss
+
+class ActivNet(nn.Module):
+    def __init__(self,index_list=[2,9,16,29,42]):
+        super(ActivNet, self).__init__()
+        self.features0 = nn.Sequential(*list(vgg19.features.children())[:index_list[0]+1])
+        self.features1 = nn.Sequential(*list(vgg19.features.children())[:index_list[1]+1])
+        self.features2 = nn.Sequential(*list(vgg19.features.children())[:index_list[2]+1])
+        self.features3 = nn.Sequential(*list(vgg19.features.children())[:index_list[3]+1])
+        self.features4 = nn.Sequential(*list(vgg19.features.children())[:index_list[4]+1])
+        
+    def get_activ(self,x,idx):
+        if (idx==0):
+            return self.features0(x)
+        elif (idx==1):
+            return self.features1(x)
+        elif (idx==2):
+            return self.features2(x)
+        elif (idx==3):
+            return self.features3(x)
+        elif (idx==4):
+            return self.features4(x)
+        
+    def eval(self):
+        self.features0.eval()
+        self.features1.eval()
+        self.features2.eval()
+        self.features3.eval()
+        self.features4.eval()
+    
+    def cuda(self):
+      self.features0.cuda()
+      self.features1.cuda()
+      self.features2.cuda()
+      self.features3.cuda()
+      self.features4.cuda()
 
 class TextureNet(nn.Module):
 
@@ -206,6 +258,17 @@ class TextureNet(nn.Module):
         
         return out
     
+    def cuda(self):
+        self.block1_1.cuda()
+        self.block2_1.cuda()
+        self.block3_1.cuda()
+        self.block4_1.cuda()
+        self.block5_1.cuda()
+        self.block1_2.cuda()
+        self.block2_2.cuda()
+        self.block3_2.cuda()
+        self.block4_2.cuda()
+    
 class NoiseTextureDataset(Dataset):
     
     def __init__(self, size, texture_path):
@@ -242,7 +305,7 @@ class NoiseTextureDataset(Dataset):
                   'texture': self.texture}     
         return sample
 
-def epoch(data, model, optimizer,train_history, src_vgg, ipt_vgg, device):
+def epoch(data, model, optimizer,train_history, device, src_vgg=None, ipt_vgg=None):
     start_time = time.time()
     total_train_loss = 0
     count=0
@@ -257,7 +320,8 @@ def epoch(data, model, optimizer,train_history, src_vgg, ipt_vgg, device):
 
         # forward + backward
         outputs = model(noise0,noise1,noise2,noise3,noise4)
-        loss = custom_loss(outputs, targets, src_vgg, ipt_vgg)
+        #loss = custom_loss(outputs, targets, src_vgg, ipt_vgg)
+        loss = custom_loss_bis(outputs,targets)
         optimizer.zero_grad()
         loss.backward()
         optimizer.step()
@@ -278,28 +342,33 @@ def train(net, batch_size, n_epochs, learning_rate, texture_path):
     
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     
-    src_vgg19 = models.vgg19_bn(pretrained=True)
-    src_net = src_vgg19.features
-    for p in src_net.parameters():
-        p.requires_grad = False
-    ipt_vgg19 = models.vgg19_bn(pretrained=True)
-    ipt_net = ipt_vgg19.features
-    for p in ipt_net.parameters():
-        p.requires_grad = False
+    #src_vgg19 = models.vgg19_bn(pretrained=True)
+    #src_net = src_vgg19.features
+    #src_net.eval()
+    #for p in src_net.parameters():
+    #    p.requires_grad = False
+    #ipt_vgg19 = models.vgg19_bn(pretrained=True)
+    #ipt_net = ipt_vgg19.features
+    #ipt_net.eval()
+    #for p in ipt_net.parameters():
+    #    p.requires_grad = False
     
     model = net
     model = model.to(device)
-    optimizer = torch.optim.Adam(model.parameters(),learning_rate)
+    #model.cuda()
+    optimizer = torch.optim.Adam(model.parameters(recurse=True),learning_rate)
     lr_sched = torch.optim.lr_scheduler.ExponentialLR(optimizer, gamma=0.95)
+    
+    for p in model.parameters():
+      p.requires_grad=True
     
     dataset = NoiseTextureDataset(batch_size, texture_path)
     #train = DataLoader(dataset, batch_size=16, shuffle=False, num_workers=2)
     train_history = []
 
-    # On itère sur les epochs
     for i in range(n_epochs):
         print("=================\n==== EPOCH "+str(i+1)+" ====\n=================\n")
-        epoch(dataset, model, optimizer, train_history, src_net, ipt_net, device)
+        epoch(dataset, model, optimizer, train_history, device)
         lr_sched.step()
     return train_history
 
@@ -319,7 +388,8 @@ print('## Defining functions: done ##')
 
 print('## Setting variables: done ##')
 #%%
-myNet=TextureNet()     
+myNet=TextureNet()
+vgg19 = models.vgg19_bn(pretrained=True)   
 history = train(myNet, 16, 10, 0.01, 'texture7.jpg')
 
 
