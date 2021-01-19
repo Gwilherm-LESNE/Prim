@@ -1,6 +1,5 @@
 # -*- coding: utf-8 -*-
 
-
 import torch
 import torch.nn as nn
 import matplotlib.pyplot as plt
@@ -11,76 +10,68 @@ import torchvision.models as models
 from skimage.transform import resize
 from torch.utils.data import Dataset, DataLoader
 from torchvision import transforms, utils
+from torch.autograd import Function
+import copy
+import scipy.fft
 
 print('## Imports: done ##')
-
-#%%     
       
+#%%
+
 def preprocess_img(x): #x is a 3D-numpy array 
-    x = resize(x,(3,224,224))
+    x = resize(x,(3,256,256))
     temp = torch.tensor(x,dtype=torch.float)
     out = torch.unsqueeze(temp,0)
     return out
 
-def get_activation(activation,name):
-    def hook(model, input, output):
-            activation[name] = output.detach()
-    return hook
-
 def gram_matrix(x):
-    result = torch.einsum('bcij,bdij->bcd', x, x)
+    result = torch.einsum('cij,dij->cd', x[0], x[0])
     shape = x.shape
-    temp = shape[2]*shape[3]
+    temp = shape[1]*shape[2]
     return result/temp
 
-def texture_loss(output,target,src_vgg19,ipt_vgg19):
-    trans=transforms.Compose([transforms.ToPILImage(),transforms.Resize((224,224)),transforms.ToTensor()])
-    output=torch.unsqueeze(trans(output),0)
-    target=torch.unsqueeze(trans(target),0)
-        
-    source_activation = {}
-    input_activation = {}
-    index_list=[2,9,16,29,42]
-    name_list=['block1_conv1','block2_conv1','block3_conv1','block4_conv1','block5_conv1']
-    for i,index in enumerate(index_list):    
-        src_vgg19[index].register_forward_hook(get_activation(source_activation,name_list[i]))
-        ipt_vgg19[index].register_forward_hook(get_activation(input_activation,name_list[i]))
-    
-    ipt_vgg19(output)
-    src_vgg19(target)
-        
-    loss=torch.tensor(0.0)  
-    for idx,name in enumerate(name_list):
-        temp = torch.pow(gram_matrix(input_activation[name])-gram_matrix(source_activation[name]),2)
-        loss = loss + torch.sum(temp)
-    return loss
-
 def texture_loss_bis(output,target):
-    trans=transforms.Compose([transforms.ToPILImage(),transforms.Resize((224,224)),transforms.ToTensor()])
-    output=torch.unsqueeze(trans(output),0)
-    target=torch.unsqueeze(trans(target),0)
-    
     loss=torch.tensor(0.0)
-    index_list=[2,9,16,29,42]
-    activNet = ActivNet(index_list)
+    #index_list=[2,9,16,29,42]
+    index_list=[2]
+    activNet = ActivNet(index_list=[2,9,16,29,42])
     activNet.cuda()
     activNet.eval()
+    preprocess = transforms.Compose([transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),])
     for idx,_ in enumerate(index_list):
-        temp = torch.pow(gram_matrix(activNet.get_activ(output,idx))-gram_matrix(activNet.get_activ(target,idx)),2)
+        temp = torch.pow(gram_matrix(activNet.get_activ(torch.unsqueeze(preprocess(output),dim=0),idx))-gram_matrix(activNet.get_activ(torch.unsqueeze(preprocess(target),dim=0),idx)),2)
         loss = loss + torch.sum(temp)
     return loss
-
-def custom_loss(outputs,targets,src_vgg,ipt_vgg):#outputs & targets are 4D arrays, first dimension is batch size
-    batch_loss = torch.tensor(0.0)
-    for i in range(outputs.shape[0]):
-        batch_loss = batch_loss + texture_loss(outputs[i],targets[i],src_vgg,ipt_vgg)
-    return batch_loss
 
 def custom_loss_bis(outputs,targets):#outputs & targets are 4D arrays, first dimension is batch size
     batch_loss = torch.tensor(0.0)
     for i in range(outputs.shape[0]):
         batch_loss = batch_loss + texture_loss_bis(outputs[i],targets[i])
     return batch_loss
+
+def spectrum_dist(src_img,ipt_img): #inputs are 4d tensors of shape (1,c,w,h)
+    src = np.transpose(src_img[0].detach().cpu().type(torch.complex128).numpy(),(2,0,1))
+    ipt = np.transpose(ipt_img[0].detach().cpu().type(torch.complex128).numpy(),(2,0,1))
+    fi = scipy.fft.fftn(src)
+    fi_hat = scipy.fft.fftn(ipt)
+    prod = np.multiply(fi_hat,np.conj(fi))
+    norm = np.divide(prod,np.absolute(prod)) 
+    i_tilde = scipy.fft.ifftn(np.multiply(norm,fi))
+    output = np.expand_dims(i_tilde, axis=0)
+    return torch.tensor(np.linalg.norm(output),dtype=torch.float)
+
+def texture_loss(output,target,spectrum=False): #Used for Gatys  
+    loss=torch.tensor(0.0)
+    index_list=[2,9,16,29,42]
+    activNet = ActivNet(index_list)
+    activNet.cuda()
+    activNet.eval()
+    for idx,_ in enumerate(index_list):
+        temp = torch.pow(gram_matrix(output[idx])-gram_matrix(activNet.get_activ(target,idx)),2)
+        loss = loss + torch.sum(temp)
+    if spectrum:
+        loss += 1e4 * spectrum_dist(target,output[-1])
+    return loss
 
 class ActivNet(nn.Module):
     def __init__(self,index_list=[2,9,16,29,42]):
@@ -109,13 +100,16 @@ class ActivNet(nn.Module):
         self.features2.eval()
         self.features3.eval()
         self.features4.eval()
-    
+
     def cuda(self):
       self.features0.cuda()
       self.features1.cuda()
       self.features2.cuda()
       self.features3.cuda()
       self.features4.cuda()
+    
+    def forward(self,x0):
+        return [self.features0(x0),self.features1(x0),self.features2(x0),self.features3(x0),self.features4(x0),x0]
 
 class TextureNet(nn.Module):
 
@@ -123,22 +117,24 @@ class TextureNet(nn.Module):
         super(TextureNet, self).__init__()
 
         self.block1_1 = torch.nn.Sequential(
-            torch.nn.Conv2d(3,8,kernel_size=3,stride=1,padding=1),
+            torch.nn.Conv2d(3,8,kernel_size=3,stride=1,padding=1, padding_mode= 'circular'),
             torch.nn.BatchNorm2d(8),
             torch.nn.LeakyReLU(),
-            torch.nn.Conv2d(8,8,kernel_size=3,stride=1,padding=1),
+            torch.nn.Conv2d(8,8,kernel_size=3,stride=1,padding=1, padding_mode= 'circular'),
             torch.nn.BatchNorm2d(8),
             torch.nn.LeakyReLU(),
             torch.nn.Conv2d(8,8,kernel_size=1,stride=1,padding=0),
             torch.nn.BatchNorm2d(8),
             torch.nn.LeakyReLU(),
             torch.nn.BatchNorm2d(8))
+        
+        self.block1_1.apply(weights_init)
         
         self.block2_1 = torch.nn.Sequential(
-            torch.nn.Conv2d(3,8,kernel_size=3,stride=1,padding=1),
+            torch.nn.Conv2d(3,8,kernel_size=3,stride=1,padding=1, padding_mode= 'circular'),
             torch.nn.BatchNorm2d(8),
             torch.nn.LeakyReLU(),
-            torch.nn.Conv2d(8,8,kernel_size=3,stride=1,padding=1),
+            torch.nn.Conv2d(8,8,kernel_size=3,stride=1,padding=1, padding_mode= 'circular'),
             torch.nn.BatchNorm2d(8),
             torch.nn.LeakyReLU(),
             torch.nn.Conv2d(8,8,kernel_size=1,stride=1,padding=0),
@@ -146,11 +142,13 @@ class TextureNet(nn.Module):
             torch.nn.LeakyReLU(),
             torch.nn.BatchNorm2d(8))
         
+        self.block2_1.apply(weights_init)
+
         self.block3_1 = torch.nn.Sequential(
-            torch.nn.Conv2d(3,8,kernel_size=3,stride=1,padding=1),
+            torch.nn.Conv2d(3,8,kernel_size=3,stride=1,padding=1, padding_mode= 'circular'),
             torch.nn.BatchNorm2d(8),
             torch.nn.LeakyReLU(),
-            torch.nn.Conv2d(8,8,kernel_size=3,stride=1,padding=1),
+            torch.nn.Conv2d(8,8,kernel_size=3,stride=1,padding=1, padding_mode= 'circular'),
             torch.nn.BatchNorm2d(8),
             torch.nn.LeakyReLU(),
             torch.nn.Conv2d(8,8,kernel_size=1,stride=1,padding=0),
@@ -158,11 +156,13 @@ class TextureNet(nn.Module):
             torch.nn.LeakyReLU(),
             torch.nn.BatchNorm2d(8))
         
+        self.block3_1.apply(weights_init)
+
         self.block4_1 = torch.nn.Sequential(
-            torch.nn.Conv2d(3,8,kernel_size=3,stride=1,padding=1),
+            torch.nn.Conv2d(3,8,kernel_size=3,stride=1,padding=1, padding_mode= 'circular'),
             torch.nn.BatchNorm2d(8),
             torch.nn.LeakyReLU(),
-            torch.nn.Conv2d(8,8,kernel_size=3,stride=1,padding=1),
+            torch.nn.Conv2d(8,8,kernel_size=3,stride=1,padding=1, padding_mode= 'circular'),
             torch.nn.BatchNorm2d(8),
             torch.nn.LeakyReLU(),
             torch.nn.Conv2d(8,8,kernel_size=1,stride=1,padding=0),
@@ -170,11 +170,13 @@ class TextureNet(nn.Module):
             torch.nn.LeakyReLU(),
             torch.nn.BatchNorm2d(8))
         
+        self.block4_1.apply(weights_init)
+
         self.block5_1 = torch.nn.Sequential(
-            torch.nn.Conv2d(3,8,kernel_size=3,stride=1,padding=1),
+            torch.nn.Conv2d(3,8,kernel_size=3,stride=1,padding=1, padding_mode= 'circular'),
             torch.nn.BatchNorm2d(8),
             torch.nn.LeakyReLU(),
-            torch.nn.Conv2d(8,8,kernel_size=3,stride=1,padding=1),
+            torch.nn.Conv2d(8,8,kernel_size=3,stride=1,padding=1, padding_mode= 'circular'),
             torch.nn.BatchNorm2d(8),
             torch.nn.LeakyReLU(),
             torch.nn.Conv2d(8,8,kernel_size=1,stride=1,padding=0),
@@ -183,11 +185,13 @@ class TextureNet(nn.Module):
             torch.nn.Upsample(scale_factor=2,mode='nearest'),
             torch.nn.BatchNorm2d(8))
         
+        self.block5_1.apply(weights_init)
+
         self.block4_2 = torch.nn.Sequential(
-            torch.nn.Conv2d(16,16,kernel_size=3,stride=1,padding=1),
+            torch.nn.Conv2d(16,16,kernel_size=3,stride=1,padding=1, padding_mode= 'circular'),
             torch.nn.BatchNorm2d(16),
             torch.nn.LeakyReLU(),
-            torch.nn.Conv2d(16,16,kernel_size=3,stride=1,padding=1),
+            torch.nn.Conv2d(16,16,kernel_size=3,stride=1,padding=1, padding_mode= 'circular'),
             torch.nn.BatchNorm2d(16),
             torch.nn.LeakyReLU(),
             torch.nn.Conv2d(16,16,kernel_size=1,stride=1,padding=0),
@@ -196,11 +200,13 @@ class TextureNet(nn.Module):
             torch.nn.Upsample(scale_factor=2,mode='nearest'),
             torch.nn.BatchNorm2d(16))
         
+        self.block4_2.apply(weights_init)
+
         self.block3_2 = torch.nn.Sequential(
-            torch.nn.Conv2d(24,24,kernel_size=3,stride=1,padding=1),
+            torch.nn.Conv2d(24,24,kernel_size=3,stride=1,padding=1, padding_mode= 'circular'),
             torch.nn.BatchNorm2d(24),
             torch.nn.LeakyReLU(),
-            torch.nn.Conv2d(24,24,kernel_size=3,stride=1,padding=1),
+            torch.nn.Conv2d(24,24,kernel_size=3,stride=1,padding=1, padding_mode= 'circular'),
             torch.nn.BatchNorm2d(24),
             torch.nn.LeakyReLU(),
             torch.nn.Conv2d(24,24,kernel_size=1,stride=1,padding=0),
@@ -209,11 +215,13 @@ class TextureNet(nn.Module):
             torch.nn.Upsample(scale_factor=2,mode='nearest'),
             torch.nn.BatchNorm2d(24))
         
+        self.block3_2.apply(weights_init)
+
         self.block2_2 = torch.nn.Sequential(
-            torch.nn.Conv2d(32,32,kernel_size=3,stride=1,padding=1),
+            torch.nn.Conv2d(32,32,kernel_size=3,stride=1,padding=1, padding_mode= 'circular'),
             torch.nn.BatchNorm2d(32),
             torch.nn.LeakyReLU(),
-            torch.nn.Conv2d(32,32,kernel_size=3,stride=1,padding=1),
+            torch.nn.Conv2d(32,32,kernel_size=3,stride=1,padding=1, padding_mode= 'circular'),
             torch.nn.BatchNorm2d(32),
             torch.nn.LeakyReLU(),
             torch.nn.Conv2d(32,32,kernel_size=1,stride=1,padding=0),
@@ -222,11 +230,13 @@ class TextureNet(nn.Module):
             torch.nn.Upsample(scale_factor=2,mode='nearest'),
             torch.nn.BatchNorm2d(32))
         
+        self.block2_2.apply(weights_init)
+
         self.block1_2 = torch.nn.Sequential(
-            torch.nn.Conv2d(40,40,kernel_size=3,stride=1,padding=1),
+            torch.nn.Conv2d(40,40,kernel_size=3,stride=1,padding=1, padding_mode= 'circular'),
             torch.nn.BatchNorm2d(40),
             torch.nn.LeakyReLU(),
-            torch.nn.Conv2d(40,40,kernel_size=3,stride=1,padding=1),
+            torch.nn.Conv2d(40,40,kernel_size=3,stride=1,padding=1, padding_mode= 'circular'),
             torch.nn.BatchNorm2d(40),
             torch.nn.LeakyReLU(),
             torch.nn.Conv2d(40,40,kernel_size=1,stride=1,padding=0),
@@ -236,6 +246,8 @@ class TextureNet(nn.Module):
             torch.nn.BatchNorm2d(3),
             torch.nn.LeakyReLU())
         
+        self.block1_2.apply(weights_init)
+
     def forward(self,x_0,x_1,x_2,x_3,x_4):
         
         x5 = self.block5_1(x_4)
@@ -259,37 +271,37 @@ class TextureNet(nn.Module):
         return out
     
     def cuda(self):
-        self.block1_1.cuda()
-        self.block2_1.cuda()
-        self.block3_1.cuda()
-        self.block4_1.cuda()
-        self.block5_1.cuda()
-        self.block1_2.cuda()
-        self.block2_2.cuda()
-        self.block3_2.cuda()
-        self.block4_2.cuda()
+      self.block5_1.cuda()
+      self.block4_1.cuda()
+      self.block3_1.cuda()
+      self.block2_1.cuda()
+      self.block1_1.cuda()
+      self.block4_2.cuda()
+      self.block3_2.cuda()
+      self.block2_2.cuda()
+      self.block1_2.cuda()
     
 class NoiseTextureDataset(Dataset):
     
     def __init__(self, size, texture_path):
         self.size = size
         
-        img = plt.imread('texture7.jpg')/255.    
-        img = np.array(img, dtype=np.float32)
+        if texture_path == 'noise':
+          img = torch.rand((256,256,3),dtype=torch.float)
+        else:
+          img = plt.imread(texture_path)/255.
+          img = np.array(img, dtype=np.float32)
+
         text = torch.tensor(np.transpose(img,(2,0,1)))
+        #preprocess = transforms.Compose([transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),])
+        #text = preprocess(text)
         self.texture = torch.unsqueeze(text,0)
-        
-        noise0 = np.random.randn(size,1,3,256,256)/9+0.5
-        noise1 = np.random.randn(size,1,3,128,128)/9+0.5
-        noise2 = np.random.randn(size,1,3,64,64)/9+0.5
-        noise3 = np.random.randn(size,1,3,32,32)/9+0.5
-        noise4 = np.random.randn(size,1,3,16,16)/9+0.5
             
-        self.noise0 = torch.tensor(noise0,dtype=torch.float)
-        self.noise1 = torch.tensor(noise1,dtype=torch.float)
-        self.noise2 = torch.tensor(noise2,dtype=torch.float)
-        self.noise3 = torch.tensor(noise3,dtype=torch.float)
-        self.noise4 = torch.tensor(noise4,dtype=torch.float)
+        self.noise0 = torch.rand((size,1,3,256,256),dtype=torch.float)
+        self.noise1 = torch.rand((size,1,3,128,128),dtype=torch.float)
+        self.noise2 = torch.rand((size,1,3,64,64),dtype=torch.float)
+        self.noise3 = torch.rand((size,1,3,32,32),dtype=torch.float)
+        self.noise4 = torch.rand((size,1,3,16,16),dtype=torch.float)
 
     def __len__(self):
         return self.size
@@ -305,9 +317,14 @@ class NoiseTextureDataset(Dataset):
                   'texture': self.texture}     
         return sample
 
-def epoch(data, model, optimizer,train_history, device, src_vgg=None, ipt_vgg=None):
+def weights_init(m):
+    if isinstance(m, nn.Conv2d):
+        torch.nn.init.xavier_uniform(m.weight.data)
+        torch.nn.init.zeros_(m.bias.data)
+
+def epoch(data, model, optimizer,train_history, device, n_iter):
     start_time = time.time()
-    total_train_loss = 0
+    total_train_loss = 0.
     count=0
     for i, sample in enumerate(data):
         
@@ -320,16 +337,37 @@ def epoch(data, model, optimizer,train_history, device, src_vgg=None, ipt_vgg=No
 
         # forward + backward
         outputs = model(noise0,noise1,noise2,noise3,noise4)
-        #loss = custom_loss(outputs, targets, src_vgg, ipt_vgg)
-        loss = custom_loss_bis(outputs,targets)
         optimizer.zero_grad()
+        #outputs = torch.clamp(outputs,0.,1.)
+        loss = custom_loss_bis(outputs, targets)
         loss.backward()
+        for p in model.parameters(recurse=True):
+            if (p.grad == None):
+                print(p)
+            p.grad /= torch.norm(p.grad, p=2, dim=0)
         optimizer.step()
+        '''
+        #update learning rate
+        if (n_iter%500 == 1):
+            for param_group in optimizer.param_groups:
+                param_group['lr'] /= 0.8
+        '''
+        total_train_loss += loss
+        '''
+        #use it if using LBFGS Loss
+        def closure():
+          outputs = model(noise0,noise1,noise2,noise3,noise4)
+          optimizer.zero_grad()
+          #outputs = torch.clamp(outputs,0.,1.)
+          loss = custom_loss_bis(outputs, targets)
+          loss.backward()
+          return loss
 
-        total_train_loss += loss.item()
+        optimizer.step(closure)
+        '''
         count+=1
    
-    print("train_loss: {:.2f} took: {:.2f}s".format(total_train_loss / count,time.time() - start_time))
+    print("train_loss: {:.5f} took: {:.2f}s".format(total_train_loss / count,time.time() - start_time))
     train_history.append(total_train_loss / count)
 
 def train(net, batch_size, n_epochs, learning_rate, texture_path):
@@ -342,54 +380,221 @@ def train(net, batch_size, n_epochs, learning_rate, texture_path):
     
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     
-    #src_vgg19 = models.vgg19_bn(pretrained=True)
-    #src_net = src_vgg19.features
-    #src_net.eval()
-    #for p in src_net.parameters():
-    #    p.requires_grad = False
-    #ipt_vgg19 = models.vgg19_bn(pretrained=True)
-    #ipt_net = ipt_vgg19.features
-    #ipt_net.eval()
-    #for p in ipt_net.parameters():
-    #    p.requires_grad = False
-    
     model = net
     model = model.to(device)
-    #model.cuda()
-    optimizer = torch.optim.Adam(model.parameters(recurse=True),learning_rate)
+    optimizer = torch.optim.Adam(model.parameters(recurse=True),lr=learning_rate)
+    #optimizer = torch.optim.LBFGS(model.parameters())
     lr_sched = torch.optim.lr_scheduler.ExponentialLR(optimizer, gamma=0.95)
-    
+
     for p in model.parameters():
       p.requires_grad=True
     
     dataset = NoiseTextureDataset(batch_size, texture_path)
-    #train = DataLoader(dataset, batch_size=16, shuffle=False, num_workers=2)
     train_history = []
 
+    # On itère sur les epochs
     for i in range(n_epochs):
-        print("=================\n==== EPOCH "+str(i+1)+" ====\n=================\n")
-        epoch(dataset, model, optimizer, train_history, device)
-        lr_sched.step()
+        print("\n==== EPOCH "+str(i+1)+" ====\n")
+        epoch(dataset, model, optimizer, train_history, device, i)
+        #To use if you want to update the learning rate
+        if (i%10 == 1) and (i>10):
+            lr_sched.step()
     return train_history
 
-print('## Defining functions: done ##')  
+def gatys(text,ite=20,spectrum=False):
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    x0 = torch.rand((1,3,224,224),dtype=torch.float)
+    x0=x0.to(device)
+    x0.requires_grad = True
+    x0 = x0.cuda()
+    text=text.to(device)
+
+    optimizer = torch.optim.LBFGS([x0])
+    #optimizer = torch.optim.Adam([x0],lr=1)
+    activNet = ActivNet([2,9,16,29,42])
+    activNet.cuda()
+    activNet.eval()
+
+    new_img = x0.clone().cpu()[0]
+    plt.figure()
+    plt.imshow(np.transpose(new_img.detach().numpy(),(1,2,0)))
+
+    for i in range(ite):
+      def closure():
+          optimizer.zero_grad()
+          out = activNet(x0)
+          loss = texture_loss(out,text,spectrum)
+          loss.backward()
+          return loss
+      print(".",end="")
+      optimizer.step(closure)
+    return x0  
+
+#generator's convolutional blocks 2D
+class Conv_block2D(nn.Module):
+    def __init__(self, n_ch_in, n_ch_out, m=0.1):
+        super(Conv_block2D, self).__init__()
+
+        self.conv1 = nn.Conv2d(n_ch_in, n_ch_out, 3, padding=0, bias=True)
+        self.bn1 = nn.BatchNorm2d(n_ch_out, momentum=m)
+        self.conv2 = nn.Conv2d(n_ch_out, n_ch_out, 3, padding=0, bias=True)
+        self.bn2 = nn.BatchNorm2d(n_ch_out, momentum=m)
+        self.conv3 = nn.Conv2d(n_ch_out, n_ch_out, 1, padding=0, bias=True)
+        self.bn3 = nn.BatchNorm2d(n_ch_out, momentum=m)
+        self.relu1 = nn.LeakyReLU()
+        self.relu2 = nn.LeakyReLU()
+        self.relu3 = nn.LeakyReLU()
+
+    def forward(self, x):
+        x = torch.cat((x[:,:,-1,:].unsqueeze(2),x,x[:,:,0,:].unsqueeze(2)),2)
+        x = torch.cat((x[:,:,:,-1].unsqueeze(3),x,x[:,:,:,0].unsqueeze(3)),3)
+        x = self.relu1(self.bn1(self.conv1(x)))
+        x = torch.cat((x[:,:,-1,:].unsqueeze(2),x,x[:,:,0,:].unsqueeze(2)),2)
+        x = torch.cat((x[:,:,:,-1].unsqueeze(3),x,x[:,:,:,0].unsqueeze(3)),3)
+        x = self.relu2(self.bn2(self.conv2(x)))
+        x = self.relu3(self.bn3(self.conv3(x)))
+        return x
+
+#Up-sampling + batch normalization block
+class Up_Bn2D(nn.Module):
+    def __init__(self, n_ch):
+        super(Up_Bn2D, self).__init__()
+
+        self.up = nn.Upsample(scale_factor=2, mode='nearest')
+        self.bn = nn.BatchNorm2d(n_ch)
+
+    def forward(self, x):
+        x = self.bn(self.up(x))
+        return x
+
+class Pyramid2D(nn.Module):
+    def __init__(self, ch_in=3, ch_step=8):
+        super(Pyramid2D, self).__init__()
+
+        self.cb1_1 = Conv_block2D(ch_in,ch_step)
+        self.up1 = Up_Bn2D(ch_step)
+
+        self.cb2_1 = Conv_block2D(ch_in,ch_step)
+        self.cb2_2 = Conv_block2D(2*ch_step,2*ch_step)
+        self.up2 = Up_Bn2D(2*ch_step)
+
+        self.cb3_1 = Conv_block2D(ch_in,ch_step)
+        self.cb3_2 = Conv_block2D(3*ch_step,3*ch_step)
+        self.up3 = Up_Bn2D(3*ch_step)
+
+        self.cb4_1 = Conv_block2D(ch_in,ch_step)
+        self.cb4_2 = Conv_block2D(4*ch_step,4*ch_step)
+        self.up4 = Up_Bn2D(4*ch_step)
+
+        self.cb5_1 = Conv_block2D(ch_in,ch_step)
+        self.cb5_2 = Conv_block2D(5*ch_step,5*ch_step)
+        self.up5 = Up_Bn2D(5*ch_step)
+
+        self.cb6_1 = Conv_block2D(ch_in,ch_step)
+        self.cb6_2 = Conv_block2D(6*ch_step,6*ch_step)
+        self.last_conv = nn.Conv2d(5*ch_step, 3, 1, padding=0, bias=True)#♣Modified
+
+    def forward(self, z0,z1,z2,z3,z4):
+
+        y = self.cb1_1(z4)
+        y = self.up1(y)
+        y = torch.cat((y,self.cb2_1(z3)),1)
+        y = self.cb2_2(y)
+        y = self.up2(y)
+        y = torch.cat((y,self.cb3_1(z2)),1)
+        y = self.cb3_2(y)
+        y = self.up3(y)
+        y = torch.cat((y,self.cb4_1(z1)),1)
+        y = self.cb4_2(y)
+        y = self.up4(y)
+        y = torch.cat((y,self.cb5_1(z0)),1)
+        y = self.cb5_2(y)
+        #y = self.up5(y)
+        #y = torch.cat((y,self.cb6_1(z[0])),1)
+        #y = self.cb6_2(y)
+        y = self.last_conv(y)
+        return y
+
+print('## Defining functions: done ##') 
+      
 #%%
 
-#text7 = plt.imread('texture7.jpg')/255
-#x0 = torch.tensor(np.random.randn(1,3,224,224)/9 + 0.5,dtype=torch.float)
-#
-#Download VGG19 models for loss computing
-#src_vgg19 = models.vgg19_bn(pretrained=True)
-#src_vgg19.eval()
-#ipt_vgg19 = models.vgg19_bn(pretrained=True)
-#ipt_vgg19.eval()
-#
-#print(texture_loss(x0,preprocess_img(text7),src_vgg19,ipt_vgg19)) #Test the loss function
+#Gatys 
 
-print('## Setting variables: done ##')
+vgg19 = models.vgg19_bn(pretrained=True)
+
+img = plt.imread('texture11.jpg')/255.
+img = np.array(img, dtype=np.float32)
+text = resize(img,(224,224,3))
+plt.imshow(text)
+text = torch.tensor(np.transpose(text,(2,0,1)),dtype=torch.float)
+
+new_text = gatys(torch.unsqueeze(text,0),ite=2000,spectrum=False)
+
+new_img = new_text.clone().cpu()[0]
+plt.figure()
+plt.imshow(np.transpose(new_img.detach().numpy(),(1,2,0)))
+plt.imsave('Results_v2\gatys.jpg',np.clip(np.transpose(new_img.detach().numpy(),(1,2,0)),0.,1.))
+
+
 #%%
-myNet=TextureNet()
-vgg19 = models.vgg19_bn(pretrained=True)   
-history = train(myNet, 16, 10, 0.01, 'texture7.jpg')
+
+##################################################################################################################################
+######################################################### EXECUTING CODE #########################################################
+##################################################################################################################################
+
+myNet = TextureNet()
+#myNet = Pyramid2D()
+myNet2 = copy.deepcopy(myNet)
 
 
+vgg19 = models.vgg19_bn(pretrained=True)
+
+noise0 = torch.rand((1,3,256,256),dtype=torch.float32)
+noise1 = torch.rand((1,3,128,128),dtype=torch.float32)
+noise2 = torch.rand((1,3,64,64),dtype=torch.float32)
+noise3 = torch.rand((1,3,32,32),dtype=torch.float32)
+noise4 = torch.rand((1,3,16,16),dtype=torch.float32)
+
+out = myNet(noise0,noise1,noise2,noise3,noise4)
+text = out.cpu().detach().numpy()
+text = np.transpose(text[0],(1,2,0))
+plt.imshow(text)
+
+print('Loss =',texture_loss_bis(out.cuda()[0],preprocess_img(plt.imread('texture7.jpg')).cuda()[0]))
+print('Valeur max de la texture générée =',np.max(text))
+      
+#%%
+
+history = train(myNet, 16, 2000, 0.08, 'texture7.jpg')
+
+myNetcpu = myNet.cpu()
+out2 = myNetcpu(noise0,noise1,noise2,noise3,noise4)
+text2 = out2.cpu().detach().numpy()
+text2 = np.transpose(text2[0],(1,2,0))
+plt.imshow(text2)
+print(np.max(text2))
+
+text_stretched = (text2 - np.min(text2))/(np.max(text2)-np.min(text2))
+plt.figure()
+plt.imshow(text_stretched)
+
+#%%
+#Try Ulyanov with VGG19 without batch normalisation
+'''
+vgg19 = models.vgg19(pretrained=True)
+history = train(myNet2, 16, 250, 0.001, 'noise')
+
+myNetcpu2 = myNet2.cpu()
+out3 = myNetcpu2(noise0,noise1,noise2,noise3,noise4)
+text4 = out3.cpu().detach().numpy()
+text4 = np.transpose(text4[0],(1,2,0))
+plt.imshow(text4)
+print(np.max(text4))
+
+text_stretched2 = (text4 - np.min(text4))/(np.max(text4)-np.min(text4))
+plt.figure()
+plt.imshow(text_stretched2)
+'''
+      
+      
