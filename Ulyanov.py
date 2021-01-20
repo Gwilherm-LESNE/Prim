@@ -50,15 +50,15 @@ def custom_loss_bis(outputs,targets):#outputs & targets are 4D arrays, first dim
     return batch_loss
 
 def spectrum_dist(src_img,ipt_img): #inputs are 4d tensors of shape (1,c,w,h)
-    src = np.transpose(src_img[0].detach().cpu().type(torch.complex128).numpy(),(2,0,1))
-    ipt = np.transpose(ipt_img[0].detach().cpu().type(torch.complex128).numpy(),(2,0,1))
-    fi = scipy.fft.fftn(src)
-    fi_hat = scipy.fft.fftn(ipt)
-    prod = np.multiply(fi_hat,np.conj(fi))
-    norm = np.divide(prod,np.absolute(prod)) 
-    i_tilde = scipy.fft.ifftn(np.multiply(norm,fi))
-    output = np.expand_dims(i_tilde, axis=0)
-    return torch.tensor(np.linalg.norm(output),dtype=torch.float)
+    src = src_img[0].type(torch.complex128).permute((1,2,0))
+    ipt = ipt_img[0].type(torch.complex128).permute((1,2,0))
+    fi = torch.fft.fftn(src)
+    fi_hat = torch.fft.fftn(ipt)
+    prod = torch.mul(fi_hat,torch.conj(fi))
+    norm = torch.div(prod,torch.absolute(prod))
+    i_tilde = torch.fft.ifftn(torch.mul(norm,fi))
+    output = torch.dist(torch.absolute(ipt), torch.absolute(i_tilde), 2)
+    return (1/2) * output**2
 
 def texture_loss(output,target,spectrum=False): #Used for Gatys  
     loss=torch.tensor(0.0)
@@ -70,7 +70,7 @@ def texture_loss(output,target,spectrum=False): #Used for Gatys
         temp = torch.pow(gram_matrix(output[idx])-gram_matrix(activNet.get_activ(target,idx)),2)
         loss = loss + torch.sum(temp)
     if spectrum:
-        loss += 1e4 * spectrum_dist(target,output[-1])
+        loss += 1e5 * spectrum_dist(target,output[-1])
     return loss
 
 class ActivNet(nn.Module):
@@ -529,12 +529,12 @@ text = resize(img,(224,224,3))
 plt.imshow(text)
 text = torch.tensor(np.transpose(text,(2,0,1)),dtype=torch.float)
 
-new_text = gatys(torch.unsqueeze(text,0),ite=2000,spectrum=False)
+new_text = gatys(torch.unsqueeze(text,0),ite=2000,spectrum=True)
 
 new_img = new_text.clone().cpu()[0]
 plt.figure()
 plt.imshow(np.transpose(new_img.detach().numpy(),(1,2,0)))
-plt.imsave('Results_v2\gatys.jpg',np.clip(np.transpose(new_img.detach().numpy(),(1,2,0)),0.,1.))
+plt.imsave('Results_v2\gatys_spectrum_1e5.jpg',np.clip(np.transpose(new_img.detach().numpy(),(1,2,0)),0.,1.))
 
 
 #%%
