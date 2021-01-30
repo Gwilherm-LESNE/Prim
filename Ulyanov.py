@@ -523,6 +523,6 @@ for i in range(5):
     out = myNet(z0,z1,z2,z3,z4,z5)
     text = out.cpu().detach()
     img = postp(text[0])
-    fname = 'sample'+str(i)+'.jpg'
+    fname = './Results_v2/sample'+str(i)+'.jpg'
     img.save(fname)      
       
